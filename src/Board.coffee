@@ -1,65 +1,152 @@
-colors = require 'colors'
-pad    = require 'pad'
+colors      = require 'colors'
+pad         = require 'pad'
+PollManager = require './PollManager'
 
 module.exports = class Board
 
-	constructor: ->
+	constructor: (@boardManager) ->
 		if config.border.length > 1
 			throw new Error 'The border configuration option only supports 1 character :('
-		
-		@title       = config.title
-		@titleColor  = config.colors.title
-		@border      = config.border
-		@borderColor = config.colors.border
 
-		colors.setTheme
-			titleColor:  @titleColor
-			borderColor: @borderColor
-			highColor:   config.colors.high
-			lowColor:    config.colors.low
+		process.on 'SIGWINCH', => 
+			@draw()
 
-		@draw()
+	silent: ->
+		@silent = true
 
-	set: (column, label, value, high, low) ->
+	set: (parameters) ->
 		unless @data?
 			@data = []
 			@data.push [] for num in [1..config.columns]
-
-		item = _.find @data[column], (item) => item.label is label
 		
-		unless item?
-			@data[column].push { label: label, value: value, high: high, low: low }
+		if (!parameters.value? and !parameters.poll_url?) or parameters.value?
+			@_createOrUpdateDataPoint parameters
 		else
-			item.value = value
+			poller = new PollManager
+				parameters: parameters
+				update:     (parameters) => @_createOrUpdateDataPoint parameters
 
+	_createOrUpdateDataPoint: (parameters) ->
+		item = _.find @data[parameters.column], (item) =>
+			unless item.label? then return null
+			return item.label is parameters.label
+
+		if item?
+			if parameters.value is 'increment'
+				item.value = parseFloat(item.value) + 1
+			else if parameters.value is 'decrement'
+				item.value = parseFloat(item.value) - 1
+			else
+				item.value = parameters.value
+		else
+			@data[parameters.column].push parameters
+
+		if @boardManager.activeBoard is @ then @draw()
+		 
 	draw: ->
 		windowSize = process.stdout.getWindowSize()
 		@width     = windowSize[0]
 		@height    = windowSize[1] - 7 # todo: figure out why this is hardcoded to fit the screen
 
+		if @width < 115
+			console.log 'Sorry, the width of your terminal must be atleast 115. There is no need to restart hubble, it will redraw when the terminal is large enough. :)'.red
+			return
+
+		@drawBuffer = ''
+
 		@_drawBorder()
 		@_drawTitle()
+
+		if config.banner?
+			@height = @height - 2
+			@_drawBlankLine()
+			@_addToDrawBuffer config.border[config.colors.border] + @_getLineTextInCenter(@width - 2, config.banner.text, config.banner.color) + config.border[config.colors.border]
 
 		for line in [0..@height]
 			@_drawLine(line)
 
 		@_drawBorder()
 
-		process.stdin.resume()
+		console.log @drawBuffer unless @silent is true
+
+	_addToDrawBuffer: (value) ->
+		@drawBuffer += value
 
 	_drawBorder: ->
-		console.log @_repeatText @width, @border.borderColor
+		@_addToDrawBuffer @_repeatText @width, config.border[config.colors.border]
 
 	_drawTitle: ->
 		@_drawBlankLine()
-		@_drawTextInCenter @title, @titleColor
+		@_addToDrawBuffer config.border[config.colors.border] + @_getLineTextInCenter(@width - 2, config.title, config.colors.title) + config.border[config.colors.border]
 		@_drawBlankLine()
 
 	_drawBlankLine: ->
-		console.log @border.borderColor + @_repeatText(@width - 2, ' ') + @border.borderColor
+		@_addToDrawBuffer config.border[config.colors.border] + @_repeatText(@width - 2, ' ') + config.border[config.colors.border]
 
-	_drawTextInCenter: (content, color) ->
-		halfSpace = (@width - 2 - content.length) / 2
+	_drawLine: (line) ->
+		unless @data? then return @_drawBlankLine()
+
+		text  = ''
+		cellSpace = @width / (@data.length * 2)
+		space     = Math.floor(cellSpace)
+
+		for column, index in @data
+			if column[line]
+				unless column[line].value?
+					unless column[line].label?
+						text += pad space, '', ' '
+						text += pad '', space, ' '
+					else
+						text += @_getLineTextInCenter space * 2, column[line].label
+				else
+					label = column[line].label + ":"
+					value = " " + column[line].value
+
+					text += pad space, label, ' '
+
+					if parseFloat(value)
+						if value > parseFloat(column[line].high) then value = value[config.colors.high]
+						if value < parseFloat(column[line].low)  then value = value[config.colors.low]
+
+					if value.length > column[line].value.toString().length + 1
+						text += pad value, space + 10, ' '
+					else
+						text += pad value, space, ' '
+			else
+				text += pad space, '', ' '
+				text += pad '', space, ' '
+
+		text = @_fixLineSpacing(cellSpace, text)
+
+		@_addToDrawBuffer config.border[config.colors.border] + text + config.border[config.colors.border]
+
+	_fixLineSpacing: (cellSpace, text) ->
+		remainder = cellSpace % 1
+
+		fixedRemainder = remainder.toFixed(2)
+
+		# two spaces for the border
+		text = text.substring(1, text.length - 1)
+
+		if config.columns is 1
+			if fixedRemainder is '0.50' then text = ' ' + text
+
+		if config.columns is 2
+			if fixedRemainder is '0.25' then text = ' ' + text
+			if fixedRemainder is '0.50' then text = ' ' + text + ' '
+			if fixedRemainder is '0.75' then text = '  ' + text + ' '
+
+		if config.columns is 3
+			if fixedRemainder is '0.17' then text = ' ' + text
+			if fixedRemainder is '0.33' then text = ' ' + text + ' '
+			if fixedRemainder is '0.50' then text = '  ' + text + ' '
+			if fixedRemainder is '0.67' then text = '  ' + text + '  '
+			if fixedRemainder is '0.83' then text = '   ' + text + '  '
+
+		return text
+
+	_getLineTextInCenter: (width, content, color) ->
+		halfSpace = (width - content.length) / 2
 
 		if halfSpace.toString().indexOf('.') > 0
 			beginningSpace = Math.floor(halfSpace)
@@ -68,41 +155,10 @@ module.exports = class Board
 			beginningSpace = halfSpace
 			endSpace       = halfSpace
 
-		console.log @border.borderColor + @_repeatText(beginningSpace, ' ') + content[color] + @_repeatText(endSpace, ' ') + @border.borderColor
-
-	_drawLine: (line) ->
-		unless @data? then return @_drawBlankLine()
-
-		text  = ''
-		space = Math.floor(@width / (@data.length * 2))
-
-		for column, index in @data
-			if column[line]
-				label    = column[line].label + ":"
-				value    = " " + @_getValue(column[line])
-
-				text += pad space, label, ' '
-
-				if value.length > column[line].value.length + 1
-					text += pad value, space + 10, ' '
-				else
-					text += pad value, space, ' '
-			else
-				text += pad space, '', ' '
-				text += pad '', space, ' '
-
-		text = @border.borderColor + text.substring(1, text.length)     # add the beginning border
-		text = text.substring(0, text.length - 1) + @border.borderColor # add the end border
-
-		console.log text
-
-	_getValue: (item) ->
-		if isNaN(item.value) then return item.value
-
-		if item.value > parseFloat(item.high) then return item.value.highColor
-		if item.value < parseFloat(item.low)  then return item.value.lowColor
-
-		return item.value
-
+		if color?
+			return @_repeatText(beginningSpace, ' ') + content[color] + @_repeatText(endSpace, ' ')
+		else
+			return @_repeatText(beginningSpace, ' ') + content + @_repeatText(endSpace, ' ')
+	
 	_repeatText: (num, char) ->
 		new Array(num + 1).join(char) # + 1 accounts for the 0 based array
